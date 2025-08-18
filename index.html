@@ -3,63 +3,109 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Image to 16-bit RGB Converter</title>
+<title>Image to 16-bit RGB Blob</title>
 <style>
-  body { font-family: sans-serif; padding: 20px; }
-  canvas { display: none; }
-  textarea { width: 100%; height: 200px; margin-top: 10px; }
+body { font-family: sans-serif; padding: 20px; }
+textarea { width: 100%; height: 250px; margin-top: 10px; }
+button { margin-top: 5px; margin-right: 10px; }
 </style>
 </head>
 <body>
-<h1>Image to 16-bit RGB Converter</h1>
-<input type="file" id="fileInput" accept="image/*">
-<br><br>
+<h1>Image to 16-bit RGB Blob & C++ Code</h1>
+<input type="file" id="fileInput" accept="image/*"><br><br>
 <button id="convertBtn">Convert Image</button>
-<textarea id="output" readonly></textarea>
-
-<canvas id="canvas"></canvas>
+<button id="downloadBtn" disabled>Download Raw File</button>
+<button id="copyCodeBtn" disabled>Copy C++ Code</button>
+<textarea id="cppCode" readonly placeholder="C++ code will appear here..."></textarea>
 
 <script>
 function RGB(r, g, b) {
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | ((b & 0xF8) >> 3);
 }
 
+let blobData = null;
+let imageWidth = 0;
+let imageHeight = 0;
+
 document.getElementById('convertBtn').addEventListener('click', () => {
     const fileInput = document.getElementById('fileInput');
-    if (!fileInput.files[0]) {
-        alert("Please select an image first!");
-        return;
-    }
+    if (!fileInput.files[0]) { alert("Select an image first!"); return; }
 
     const reader = new FileReader();
     reader.onload = function(e) {
         const img = new Image();
         img.onload = function() {
-            const canvas = document.getElementById('canvas');
+            imageWidth = img.width;
+            imageHeight = img.height;
+
+            const canvas = document.createElement('canvas');
             canvas.width = img.width;
             canvas.height = img.height;
             const ctx = canvas.getContext('2d');
             ctx.drawImage(img, 0, 0);
 
             const imgData = ctx.getImageData(0, 0, img.width, img.height).data;
-            let outputText = `// Width: ${img.width}, Height: ${img.height}\n`;
-            outputText += `const uint16_t imageData[${img.width * img.height}] = {\n`;
+            const buffer = new ArrayBuffer(img.width * img.height * 2); // 2 bytes per pixel
+            const view = new DataView(buffer);
 
+            let cppArrayText = `// Format: RGB565 (16-bit) width: ${img.width}, height: ${img.height}\n`;
+            cppArrayText += `const uint16_t imageData[${img.width * img.height}] = {\n`;
+
+            let offset = 0;
             for (let i = 0; i < imgData.length; i += 4) {
                 const r = imgData[i];
                 const g = imgData[i+1];
                 const b = imgData[i+2];
-                const color = RGB(r, g, b);
-                outputText += `0x${color.toString(16).padStart(4,'0')},`;
-                if ((i/4 + 1) % img.width === 0) outputText += '\n';
-            }
+                const color = RGB(r,g,b);
+                view.setUint16(offset, color, false); // big endian
+                offset += 2;
 
-            outputText += '};';
-            document.getElementById('output').value = outputText;
+                cppArrayText += `0x${color.toString(16).padStart(4,'0')},`;
+                if (((i/4)+1) % img.width === 0) cppArrayText += '\n';
+            }
+            cppArrayText += '};\n\n';
+
+            cppArrayText += `// Example usage (TFT, SPI, SD initialized):\n`;
+            cppArrayText += `#include <SPI.h>\n#include <SD.h>\n#include <TFT_eSPI.h>\n\n`;
+            cppArrayText += `TFT_eSPI tft = TFT_eSPI();\n\n`;
+            cppArrayText += `void drawImageFromSD(const char* filename, int x, int y) {\n`;
+            cppArrayText += `  File f = SD.open(filename, FILE_READ);\n`;
+            cppArrayText += `  if (!f) return;\n`;
+            cppArrayText += `  for (int j = 0; j < ${img.height}; j++) {\n`;
+            cppArrayText += `    for (int i = 0; i < ${img.width}; i++) {\n`;
+            cppArrayText += `      uint16_t color;\n`;
+            cppArrayText += `      color = f.read() << 8; // high byte\n`;
+            cppArrayText += `      color |= f.read();     // low byte\n`;
+            cppArrayText += `      tft.drawPixel(x + i, y + j, color);\n`;
+            cppArrayText += `    }\n  }\n  f.close();\n}\n`;
+
+            document.getElementById('cppCode').value = cppArrayText;
+
+            blobData = new Blob([buffer], {type: 'application/octet-stream'});
+            document.getElementById('downloadBtn').disabled = false;
+            document.getElementById('copyCodeBtn').disabled = false;
         }
         img.src = e.target.result;
     }
     reader.readAsDataURL(fileInput.files[0]);
+});
+
+// Download raw blob
+document.getElementById('downloadBtn').addEventListener('click', () => {
+    if (!blobData) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blobData);
+    a.download = 'image16bit.raw';
+    a.click();
+});
+
+// Copy C++ code
+document.getElementById('copyCodeBtn').addEventListener('click', () => {
+    const cppCode = document.getElementById('cppCode');
+    cppCode.select();
+    cppCode.setSelectionRange(0, cppCode.value.length);
+    document.execCommand('copy');
+    alert('C++ code copied to clipboard!');
 });
 </script>
 </body>
