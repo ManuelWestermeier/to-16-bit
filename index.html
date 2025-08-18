@@ -45,13 +45,18 @@ document.getElementById('convertBtn').addEventListener('click', () => {
             ctx.drawImage(img, 0, 0);
 
             const imgData = ctx.getImageData(0, 0, img.width, img.height).data;
-            const buffer = new ArrayBuffer(img.width * img.height * 2); // 2 bytes per pixel
+
+            // Create buffer: 2 bytes for width, 2 bytes for height, 2 bytes per pixel
+            const buffer = new ArrayBuffer(2 + 2 + img.width * img.height * 2);
             const view = new DataView(buffer);
 
-            let cppArrayText = `// Format: RGB565 (16-bit) width: ${img.width}, height: ${img.height}\n`;
+            view.setUint16(0, img.width, false);   // width (big endian)
+            view.setUint16(2, img.height, false);  // height (big endian)
+
+            let cppArrayText = `// Format: width (16-bit), height (16-bit), followed by RGB565 pixel data\n`;
             cppArrayText += `const uint16_t imageData[${img.width * img.height}] = {\n`;
 
-            let offset = 0;
+            let offset = 4; // start after width+height
             for (let i = 0; i < imgData.length; i += 4) {
                 const r = imgData[i];
                 const g = imgData[i+1];
@@ -71,12 +76,12 @@ document.getElementById('convertBtn').addEventListener('click', () => {
             cppArrayText += `void drawImageFromSD(const char* filename, int x, int y) {\n`;
             cppArrayText += `  File f = SD.open(filename, FILE_READ);\n`;
             cppArrayText += `  if (!f) return;\n`;
-            cppArrayText += `  for (int j = 0; j < ${img.height}; j++) {\n`;
-            cppArrayText += `    for (int i = 0; i < ${img.width}; i++) {\n`;
-            cppArrayText += `      uint16_t color;\n`;
-            cppArrayText += `      color = f.read() << 8; // high byte\n`;
-            cppArrayText += `      color |= f.read();     // low byte\n`;
-            cppArrayText += `      tft.drawPixel(x + i, y + j, color);\n`;
+            cppArrayText += `  uint16_t w = f.read() << 8 | f.read();\n`;
+            cppArrayText += `  uint16_t h = f.read() << 8 | f.read();\n`;
+            cppArrayText += `  for (int j = 0; j < h; j++) {\n`;
+            cppArrayText += `    for (int i = 0; i < w; i++) {\n`;
+            cppArrayText += `      uint16_t color = f.read() << 8 | f.read();\n`;
+            cppArrayText += `      tft.drawPixel(x+i, y+j, color);\n`;
             cppArrayText += `    }\n  }\n  f.close();\n}\n`;
 
             document.getElementById('cppCode').value = cppArrayText;
