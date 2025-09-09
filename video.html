@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Video to RGB565 Converter</title>
+</head>
+<body>
+<h1>Video to RGB565 Converter</h1>
+<input type="file" id="videoFile" accept="video/*">
+<br><br>
+<label>Width: <input type="number" id="width" value="160"></label>
+<label>Height: <input type="number" id="height" value="120"></label>
+<br><br>
+<button id="convertBtn">Convert Video</button>
+<br><br>
+<a id="downloadLink" style="display:none;">Download</a>
+
+<video id="video" style="display:none;"></video>
+<canvas id="canvas" style="display:none;"></canvas>
+
+<script>
+function rgbTo565(r, g, b) {
+    let value = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+    return value;
+}
+
+document.getElementById('convertBtn').onclick = async () => {
+    const fileInput = document.getElementById('videoFile');
+    if (!fileInput.files[0]) { alert('Select a video'); return; }
+
+    const width = parseInt(document.getElementById('width').value);
+    const height = parseInt(document.getElementById('height').value);
+
+    const video = document.getElementById('video');
+    video.src = URL.createObjectURL(fileInput.files[0]);
+    await video.play();
+
+    const canvas = document.getElementById('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+
+    const frames = [];
+    const fps = 20;
+    const interval = 1000 / fps;
+
+    // Wait for video metadata
+    await new Promise(resolve => video.onloadedmetadata = resolve);
+
+    let currentTime = 0;
+    while (currentTime < video.duration) {
+        video.currentTime = currentTime;
+        await new Promise(resolve => video.onseeked = resolve);
+
+        ctx.drawImage(video, 0, 0, width, height);
+        const imageData = ctx.getImageData(0, 0, width, height).data;
+
+        const frameData = new Uint8Array(width * height * 2);
+        for (let i = 0; i < width * height; i++) {
+            const r = imageData[i*4];
+            const g = imageData[i*4 + 1];
+            const b = imageData[i*4 + 2];
+            const c565 = rgbTo565(r,g,b);
+            frameData[i*2] = c565 & 0xFF;
+            frameData[i*2 + 1] = (c565 >> 8) & 0xFF;
+        }
+
+        frames.push(frameData);
+        currentTime += 1/fps;
+    }
+
+    // Build final file
+    const totalLength = frames.reduce((sum, f) => sum + f.length, 0);
+    const header = new Uint8Array(8);
+    header[0] = width & 0xFF;
+    header[1] = (width >> 8) & 0xFF;
+    header[2] = height & 0xFF;
+    header[3] = (height >> 8) & 0xFF;
+    header[4] = totalLength & 0xFF;
+    header[5] = (totalLength >> 8) & 0xFF;
+    header[6] = (totalLength >> 16) & 0xFF;
+    header[7] = (totalLength >> 24) & 0xFF;
+
+    const blobParts = [header, ...frames];
+    const blob = new Blob(blobParts, {type:'application/octet-stream'});
+    const link = document.getElementById('downloadLink');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'video.rgb565';
+    link.style.display = 'inline';
+    link.textContent = 'Download RGB565 Video';
+};
+</script>
+</body>
+</html>
