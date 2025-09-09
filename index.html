@@ -8,11 +8,14 @@
 body { font-family: sans-serif; padding: 20px; }
 textarea { width: 100%; height: 250px; margin-top: 10px; }
 button { margin-top: 5px; margin-right: 10px; }
+input[type=number] { width: 60px; }
 </style>
 </head>
 <body>
 <h1>Image to 16-bit RGB Blob & C++ Code</h1>
 <input type="file" id="fileInput" accept="image/*"><br><br>
+<label>Width: <input type="number" id="resizeWidth" value="20" min="1"></label>
+<label>Height: <input type="number" id="resizeHeight" value="20" min="1"></label><br><br>
 <button id="convertBtn">Convert Image</button>
 <button id="downloadBtn" disabled>Download Raw File</button>
 <button id="copyCodeBtn" disabled>Copy C++ Code</button>
@@ -31,30 +34,34 @@ document.getElementById('convertBtn').addEventListener('click', () => {
     const fileInput = document.getElementById('fileInput');
     if (!fileInput.files[0]) { alert("Select an image first!"); return; }
 
+    const targetWidth = parseInt(document.getElementById('resizeWidth').value) || 20;
+    const targetHeight = parseInt(document.getElementById('resizeHeight').value) || 20;
+
     const reader = new FileReader();
     reader.onload = function(e) {
         const img = new Image();
         img.onload = function() {
-            imageWidth = img.width;
-            imageHeight = img.height;
+            imageWidth = targetWidth;
+            imageHeight = targetHeight;
 
             const canvas = document.createElement('canvas');
-            canvas.width = img.width;
-            canvas.height = img.height;
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
             const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0);
+            // Draw image scaled to target size
+            ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
 
-            const imgData = ctx.getImageData(0, 0, img.width, img.height).data;
+            const imgData = ctx.getImageData(0, 0, targetWidth, targetHeight).data;
 
             // Create buffer: 2 bytes for width, 2 bytes for height, 2 bytes per pixel
-            const buffer = new ArrayBuffer(2 + 2 + img.width * img.height * 2);
+            const buffer = new ArrayBuffer(2 + 2 + targetWidth * targetHeight * 2);
             const view = new DataView(buffer);
 
-            view.setUint16(0, img.width, false);   // width (big endian)
-            view.setUint16(2, img.height, false);  // height (big endian)
+            view.setUint16(0, targetWidth, false);   // width (big endian)
+            view.setUint16(2, targetHeight, false);  // height (big endian)
 
             let cppArrayText = `// Format: width (16-bit), height (16-bit), followed by RGB565 pixel data\n`;
-            cppArrayText += `const uint16_t imageData[${img.width * img.height}] = {\n`;
+            cppArrayText += `const uint16_t imageData[${targetWidth * targetHeight}] = {\n`;
 
             let offset = 4; // start after width+height
             for (let i = 0; i < imgData.length; i += 4) {
@@ -66,7 +73,7 @@ document.getElementById('convertBtn').addEventListener('click', () => {
                 offset += 2;
 
                 cppArrayText += `0x${color.toString(16).padStart(4,'0')},`;
-                if (((i/4)+1) % img.width === 0) cppArrayText += '\n';
+                if (((i/4)+1) % targetWidth === 0) cppArrayText += '\n';
             }
             cppArrayText += '};\n\n';
 
