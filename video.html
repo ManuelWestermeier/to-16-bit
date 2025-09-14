@@ -19,10 +19,9 @@
 <canvas id="canvas" style="display:none;"></canvas>
 
 <script>
-function rgbTo565LE(r, g, b) {
-    // Little-endian direkt für ESP32 pushImage
-    let value = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-    return [value & 0xFF, (value >> 8) & 0xFF]; // low byte first
+function rgbTo565(r, g, b) {
+    // r: 8-bit, g: 8-bit, b: 8-bit -> 16-bit RGB565
+    return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
 document.getElementById('convertBtn').onclick = async () => {
@@ -34,7 +33,9 @@ document.getElementById('convertBtn').onclick = async () => {
 
     const video = document.getElementById('video');
     video.src = URL.createObjectURL(fileInput.files[0]);
-    await video.play();
+
+    // wait for metadata
+    await new Promise(resolve => video.onloadedmetadata = resolve);
 
     const canvas = document.getElementById('canvas');
     canvas.width = width;
@@ -43,50 +44,54 @@ document.getElementById('convertBtn').onclick = async () => {
 
     const frames = [];
     const fps = 20;
-    const interval = 1000 / fps;
-
-    await new Promise(resolve => video.onloadedmetadata = resolve);
-
+    const interval = 1 / fps;
     let currentTime = 0;
+
     while (currentTime < video.duration) {
-        video.currentTime = currentTime;
+        // seek
+        video.currentTime = Math.min(currentTime, video.duration - 0.001);
         await new Promise(resolve => video.onseeked = resolve);
 
         ctx.drawImage(video, 0, 0, width, height);
         const imageData = ctx.getImageData(0, 0, width, height).data;
 
+        // build frame in MSB-first order: high byte first, low byte second
         const frameData = new Uint8Array(width * height * 2);
         for (let i = 0; i < width * height; i++) {
             const r = imageData[i*4];
             const g = imageData[i*4 + 1];
             const b = imageData[i*4 + 2];
-            const [lo, hi] = rgbTo565LE(r,g,b);
-            frameData[i*2] = lo;
-            frameData[i*2 + 1] = hi;
+            const c565 = rgbTo565(r,g,b);
+            // MSB-first (high byte first). This matches the ESP player's expectation when it casts to uint16_t*.
+            frameData[i*2]     = (c565 >> 8) & 0xFF; // high byte
+            frameData[i*2 + 1] = c565 & 0xFF;        // low byte
         }
+
         frames.push(frameData);
-        currentTime += 1/fps;
+        currentTime += interval;
     }
 
-    // Build final file
-    const totalLength = frames.reduce((sum, f) => sum + f.length, 0);
+    // header: width(2), height(2), framesCount(4) all little-endian for width/height, and framesCount little-endian
+    const framesCount = frames.length;
     const header = new Uint8Array(8);
     header[0] = width & 0xFF;
     header[1] = (width >> 8) & 0xFF;
     header[2] = height & 0xFF;
     header[3] = (height >> 8) & 0xFF;
-    header[4] = totalLength & 0xFF;
-    header[5] = (totalLength >> 8) & 0xFF;
-    header[6] = (totalLength >> 16) & 0xFF;
-    header[7] = (totalLength >> 24) & 0xFF;
+    header[4] = framesCount & 0xFF;
+    header[5] = (framesCount >> 8) & 0xFF;
+    header[6] = (framesCount >> 16) & 0xFF;
+    header[7] = (framesCount >> 24) & 0xFF;
 
+    // concat
+    const totalLength = frames.reduce((sum, f) => sum + f.length, 0);
     const blobParts = [header, ...frames];
     const blob = new Blob(blobParts, {type:'application/octet-stream'});
     const link = document.getElementById('downloadLink');
     link.href = URL.createObjectURL(blob);
     link.download = 'video.rgb565';
     link.style.display = 'inline';
-    link.textContent = 'Download RGB565 Video';
+    link.textContent = `Download RGB565 Video (${width}x${height}, ${framesCount} frames, ${totalLength} bytes payload)`;
 };
 </script>
 </body>
