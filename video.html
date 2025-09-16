@@ -2,18 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Video to RGB565 Converter (delta+RLE)</title>
+<title>Video to RGB565 Converter</title>
 </head>
 <body>
-<h1>Video to RGB565 Converter (delta + RLE, max 4 changed rows/frame)</h1>
+<h1>Video to RGB565 Converter</h1>
 <input type="file" id="videoFile" accept="video/*">
 <br><br>
 <label>Width: <input type="number" id="width" value="160"></label>
 <label>Height: <input type="number" id="height" value="120"></label>
-<br><br>
-<label>FPS: <input type="number" id="fps" value="20"></label>
-<label>Max changed rows per frame: <input type="number" id="maxRows" value="4" min="1" max="10"></label>
-<label>Keyframe interval (frames): <input type="number" id="keyframe" value="100" min="1"></label>
 <br><br>
 <button id="convertBtn">Convert Video</button>
 <br><br>
@@ -23,17 +19,9 @@
 <canvas id="canvas" style="display:none;"></canvas>
 
 <script>
-// helpers
 function rgbTo565(r, g, b) {
+    // r: 8-bit, g: 8-bit, b: 8-bit -> 16-bit RGB565
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-}
-
-// pack little-endian helpers
-function u16le(v) {
-    return new Uint8Array([v & 0xFF, (v >> 8) & 0xFF]);
-}
-function u32le(v) {
-    return new Uint8Array([v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF, (v >> 24) & 0xFF]);
 }
 
 document.getElementById('convertBtn').onclick = async () => {
@@ -42,13 +30,11 @@ document.getElementById('convertBtn').onclick = async () => {
 
     const width = parseInt(document.getElementById('width').value);
     const height = parseInt(document.getElementById('height').value);
-    const fps = parseInt(document.getElementById('fps').value) || 20;
-    const maxRows = parseInt(document.getElementById('maxRows').value) || 4;
-    const keyframeInterval = parseInt(document.getElementById('keyframe').value) || 100;
 
     const video = document.getElementById('video');
     video.src = URL.createObjectURL(fileInput.files[0]);
 
+    // wait for metadata
     await new Promise(resolve => video.onloadedmetadata = resolve);
 
     const canvas = document.getElementById('canvas');
@@ -57,202 +43,55 @@ document.getElementById('convertBtn').onclick = async () => {
     const ctx = canvas.getContext('2d');
 
     const frames = [];
+    const fps = 20;
     const interval = 1 / fps;
     let currentTime = 0;
-    let frameIdx = 0;
 
-    // previous frame rows for diffing:
-    let prevRows = new Array(height);
-    for (let r = 0; r < height; ++r) {
-        prevRows[r] = new Uint16Array(width); // initialized to zero
-    }
-
-    function encodeRowRLE(rowPixels16) {
-        // rowPixels16: Uint16Array (length = width), MSB-first bytes when written
-        // Build tokens as described. Return Uint8Array compressed.
-        const out = [];
-        let i = 0;
-        while (i < rowPixels16.length) {
-            // try to detect run
-            const val = rowPixels16[i];
-            let runLen = 1;
-            while (i + runLen < rowPixels16.length && rowPixels16[i + runLen] === val && runLen < 127) runLen++;
-            if (runLen >= 3) {
-                // emit run token
-                out.push(0x80 | runLen);
-                out.push((val >> 8) & 0xFF); // high byte
-                out.push(val & 0xFF);
-                i += runLen;
-            } else {
-                // emit literal: collect up to 127 pixels or until a long run is next
-                const litStart = i;
-                let litCount = 0;
-                while (i < rowPixels16.length && litCount < 127) {
-                    // break if a run of >=3 starts here (start of the next token)
-                    if (i + 3 <= rowPixels16.length) {
-                        if (rowPixels16[i] === rowPixels16[i+1] && rowPixels16[i] === rowPixels16[i+2]) {
-                            break;
-                        }
-                    }
-                    i++; litCount++;
-                }
-                out.push(litCount & 0x7F);
-                // append litCount*2 bytes
-                for (let j = 0; j < litCount; ++j) {
-                    const v = rowPixels16[litStart + j];
-                    out.push((v >> 8) & 0xFF);
-                    out.push(v & 0xFF);
-                }
-            }
-        }
-
-        return new Uint8Array(out);
-    }
-
-    while (currentTime < video.duration - 0.0001) {
+    while (currentTime < video.duration) {
+        // seek
         video.currentTime = Math.min(currentTime, video.duration - 0.001);
         await new Promise(resolve => video.onseeked = resolve);
 
         ctx.drawImage(video, 0, 0, width, height);
         const imageData = ctx.getImageData(0, 0, width, height).data;
 
-        // read into a Uint16 row array
-        const rows = new Array(height);
-        for (let r = 0; r < height; ++r) {
-            const row16 = new Uint16Array(width);
-            for (let x = 0; x < width; ++x) {
-                const idx = (r * width + x) * 4;
-                const r8 = imageData[idx], g8 = imageData[idx + 1], b8 = imageData[idx + 2];
-                row16[x] = rgbTo565(r8, g8, b8);
-            }
-            rows[r] = row16;
+        // build frame in MSB-first order: high byte first, low byte second
+        const frameData = new Uint8Array(width * height * 2);
+        for (let i = 0; i < width * height; i++) {
+            const r = imageData[i*4];
+            const g = imageData[i*4 + 1];
+            const b = imageData[i*4 + 2];
+            const c565 = rgbTo565(r,g,b);
+            // MSB-first (high byte first). This matches the ESP player's expectation when it casts to uint16_t*.
+            frameData[i*2]     = (c565 >> 8) & 0xFF; // high byte
+            frameData[i*2 + 1] = c565 & 0xFF;        // low byte
         }
 
-        // Decide changed rows (count differing pixels per row)
-        const diffs = new Array(height);
-        for (let r = 0; r < height; ++r) {
-            let cnt = 0;
-            const a = rows[r], b = prevRows[r];
-            for (let x = 0; x < width; ++x) if (a[x] !== b[x]) cnt++;
-            diffs[r] = { row: r, diff: cnt };
-        }
-        diffs.sort((a, b) => b.diff - a.diff); // descending
-
-        // Build frame binary
-        const parts = [];
-
-        // header remained same; framesCount is computed later, we just push the per-frame data
-        const wantKeyframe = (frameIdx === 0) || (frameIdx % keyframeInterval === 0);
-
-        if (wantKeyframe) {
-            // full frame: marker 0xFF then raw frame bytes (row-major, MSB-first)
-            parts.push(new Uint8Array([0xFF]));
-            const raw = new Uint8Array(width * height * 2);
-            let p = 0;
-            for (let r = 0; r < height; ++r) {
-                for (let x = 0; x < width; ++x) {
-                    const v = rows[r][x];
-                    raw[p++] = (v >> 8) & 0xFF;
-                    raw[p++] = v & 0xFF;
-                }
-            }
-            parts.push(raw);
-            // update prevRows
-            for (let r = 0; r < height; ++r) prevRows[r].set(rows[r]);
-        } else {
-            // pick up to maxRows with diff > 0
-            const chosen = [];
-            for (let i = 0; i < diffs.length && chosen.length < maxRows; ++i) {
-                if (diffs[i].diff > 0) chosen.push(diffs[i].row);
-            }
-            const N = chosen.length;
-            parts.push(new Uint8Array([N & 0xFF]));
-
-            for (let i = 0; i < N; ++i) {
-                const r = chosen[i];
-                // compress row r
-                const compressed = encodeRowRLE(rows[r]);
-                // if compressed bigger than raw row, fall back to raw row as literal
-                const bytesPerRow = width * 2;
-                let payload;
-                if (compressed.length > bytesPerRow) {
-                    // raw row
-                    const rawRow = new Uint8Array(bytesPerRow);
-                    let p = 0;
-                    for (let x = 0; x < width; ++x) {
-                        const v = rows[r][x];
-                        rawRow[p++] = (v >> 8) & 0xFF;
-                        rawRow[p++] = v & 0xFF;
-                    }
-                    // wrap raw into a single literal token: control byte count + data
-                    // But simpler: set payload = rawRow and the ESP will interpret as "raw literal" if you so choose.
-                    // We'll send as literal token to keep decoder simple:
-                    const tokenOut = new Uint8Array(1 + bytesPerRow);
-                    tokenOut[0] = width & 0x7F; // literal token count (=width, works up to 127; if width>127 we emit multiple tokens)
-                    // Note: for width>127 we must split into chunks; handle that:
-                    let outTokens = [];
-                    let idx = 0;
-                    let remaining = width;
-                    while (remaining > 0) {
-                        const chunk = Math.min(127, remaining);
-                        const t = new Uint8Array(1 + chunk * 2);
-                        t[0] = chunk & 0x7F;
-                        for (let k = 0; k < chunk; ++k) {
-                            const v = rows[r][idx + k];
-                            t[1 + k*2] = (v >> 8) & 0xFF;
-                            t[1 + k*2 + 1] = v & 0xFF;
-                        }
-                        outTokens.push(t);
-                        idx += chunk;
-                        remaining -= chunk;
-                    }
-                    // concat tokens
-                    payload = new Uint8Array(outTokens.reduce((s,t)=>s+t.length,0));
-                    let pp = 0;
-                    outTokens.forEach(t => { payload.set(t, pp); pp += t.length; });
-                } else {
-                    payload = compressed;
-                }
-
-                // append row header: rowIndex (2 bytes LE), payloadLen (2 bytes LE), payload
-                parts.push(u16le(r));
-                parts.push(u16le(payload.length));
-                parts.push(payload);
-
-                // update prevRows row
-                prevRows[r].set(rows[r]);
-            }
-        }
-
-        // concat parts for this frame and push
-        let frameLen = parts.reduce((s, p) => s + p.length, 0);
-        const frameBuf = new Uint8Array(frameLen);
-        let pos = 0;
-        for (let p of parts) { frameBuf.set(p, pos); pos += p.length; }
-        frames.push(frameBuf);
-
+        frames.push(frameData);
         currentTime += interval;
-        frameIdx++;
-    } // while frames
+    }
 
-    // Build final blob: header + frames concatenated
+    // header: width(2), height(2), framesCount(4) all little-endian for width/height, and framesCount little-endian
+    const framesCount = frames.length;
     const header = new Uint8Array(8);
-    header.set(u16le(width), 0);
-    header.set(u16le(height), 2);
-    header.set(u32le(frames.length), 4);
+    header[0] = width & 0xFF;
+    header[1] = (width >> 8) & 0xFF;
+    header[2] = height & 0xFF;
+    header[3] = (height >> 8) & 0xFF;
+    header[4] = framesCount & 0xFF;
+    header[5] = (framesCount >> 8) & 0xFF;
+    header[6] = (framesCount >> 16) & 0xFF;
+    header[7] = (framesCount >> 24) & 0xFF;
 
-    const totalLen = 8 + frames.reduce((s,f)=>s+f.length,0);
-    const out = new Uint8Array(totalLen);
-    let p = 0;
-    out.set(header, p); p += 8;
-    for (let f of frames) { out.set(f, p); p += f.length; }
-
+    // concat
+    const totalLength = frames.reduce((sum, f) => sum + f.length, 0);
+    const blobParts = [header, ...frames];
+    const blob = new Blob(blobParts, {type:'application/octet-stream'});
     const link = document.getElementById('downloadLink');
-    const blob = new Blob([out.buffer], {type:'application/octet-stream'});
     link.href = URL.createObjectURL(blob);
     link.download = 'video.rgb565';
     link.style.display = 'inline';
-    link.textContent = `Download RGB565 Video (${width}x${height}, ${frames.length} frames, ${totalLen} bytes)`;
+    link.textContent = `Download RGB565 Video (${width}x${height}, ${framesCount} frames, ${totalLength} bytes payload)`;
 };
 </script>
 </body>
