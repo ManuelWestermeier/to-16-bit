@@ -1,65 +1,27 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <title>Video+Audio -> VAM1 (RGB565 + IMA ADPCM)</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body{font-family:sans-serif;padding:12px;max-width:900px;margin:auto;}
-    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-    label{display:inline-flex;gap:6px;align-items:center}
-    #drop{border:2px dashed #ccc;padding:16px;border-radius:8px;margin:8px 0;text-align:center}
-    #dl{display:none}
-    progress{width:100%}
-    small{color:#666}
-    pre{background:#f6f6f6;padding:8px;border-radius:6px;overflow:auto}
-  </style>
+  <meta charset="utf-8">
+  <title>VAM1 Player</title>
+  <style>body{font-family:sans-serif;padding:12px;} canvas{border:1px solid #ccc;}</style>
 </head>
 <body>
-<h2>Video+Audio → VAM1 Converter</h2>
-<p>Select or drop a video file and press Convert. Output is a <code>.vam</code> binary suitable for the ESP player.</p>
-
-<div id="drop">Drop video file here or use the file picker below</div>
-<input id="file" type="file" accept="video/*">
-<div class="row" style="margin-top:8px;">
-  <label>Width <input id="width" type="number" value="160" min="1"></label>
-  <label>Height <input id="height" type="number" value="120" min="1"></label>
-  <label>FPS <input id="fps" type="number" value="20" step="1" min="1"></label>
-</div>
-<div class="row" style="margin-top:6px;">
-  <label>Audio sample rate <input id="asr" type="number" value="22050" min="4000"></label>
-  <label>Audio channels <select id="ach"><option>1</option><option selected>2</option></select></label>
-</div>
-
-<br>
-<button id="convert">Convert</button>
-<a id="dl" class="row" style="margin-left:12px;">Download .vam</a>
+<h2>VAM1 Player</h2>
+<input type="file" id="file" accept=".vam">
 <br><br>
-<progress id="prog" value="0" max="1"></progress>
-<div style="display:flex;gap:12px;align-items:center;margin-top:6px;">
-  <div><strong id="status">Idle</strong></div>
-  <div><small id="info"></small></div>
-</div>
-
-<video id="v" style="display:none"></video>
-<canvas id="c" style="display:none"></canvas>
-
-<pre id="log" style="display:none"></pre>
+<canvas id="canvas"></canvas>
+<audio id="audio" controls></audio>
 
 <script>
-/*
- Upgraded VAM1 converter:
- - Resamples audio via OfflineAudioContext (higher quality)
- - Better seeking & progress
- - Drag & drop and file info
- - Keep much of original algorithm (RGB565 bytes, per-scanline PackBits-like RLE, IMA ADPCM)
-*/
+// --- Helpers ---
+function readLE32(data, offset) {
+  return data[offset] | (data[offset+1]<<8) | (data[offset+2]<<16) | (data[offset+3]<<24);
+}
+function readLE16(data, offset) {
+  return data[offset] | (data[offset+1]<<8);
+}
 
-// --- small helpers ---
-function writeLE32(arr, v){ arr.push((v & 0xFF), ((v>>8)&0xFF), ((v>>16)&0xFF), ((v>>24)&0xFF)); }
-function writeLE16(arr, v){ arr.push((v & 0xFF), ((v>>8)&0xFF)); }
-
-// IMA ADPCM tables
+// IMA ADPCM decoder (nibble-based, 16-bit PCM output)
 const IMA_INDEX_TABLE = [ -1,-1,-1,-1,2,4,6,8, -1,-1,-1,-1,2,4,6,8 ];
 const IMA_STEP_TABLE = [
   7, 8, 9, 10, 11, 12, 13, 14, 16,17,19,21,23,25,28,31,
@@ -70,300 +32,133 @@ const IMA_STEP_TABLE = [
   15289,16818,18500,20350,22385,24623,27086,29794,32767
 ];
 
-// pack nibbles low then high
-function packNibbles(nibbles) {
-  const out = new Uint8Array(Math.ceil(nibbles.length/2));
-  for (let i=0;i<nibbles.length;i+=2) {
-    const lo = nibbles[i] & 0xF;
-    const hi = (i+1<nibbles.length) ? (nibbles[i+1]&0xF) : 0;
-    out[Math.floor(i/2)] = (hi<<4)|lo;
-  }
-  return out;
-}
-
-// Convert rgba scanline to RGB565 big-endian (hi,lo)
-function rgbaToRgb565Bytes(rgba, y, width) {
-  const out = new Uint8Array(width*2);
-  const base = y*width*4;
-  for (let x=0;x<width;x++){
-    const r = rgba[base + x*4 + 0];
-    const g = rgba[base + x*4 + 1];
-    const b = rgba[base + x*4 + 2];
-    const c565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
-    out[x*2] = (c565 >> 8) & 0xFF;
-    out[x*2 + 1] = c565 & 0xFF;
-  }
-  return out;
-}
-
-// PackBits-like RLE per scanline using pixels as 16-bit items
-function compressScanline565(scanlineBytes, widthPixels) {
-  const out = [];
-  function readPixel(idx){ return (scanlineBytes[idx*2]<<8) | scanlineBytes[idx*2+1]; }
-  let i=0;
-  while (i < widthPixels) {
-    // check run
-    let run = 1;
-    while (i+run < widthPixels && readPixel(i+run) === readPixel(i) && run < 128) run++;
-    if (run >= 3) {
-      // repeat run header = -(run-1) as signed byte
-      out.push(((256 + (-(run-1))) & 0xFF));
-      const p = readPixel(i);
-      out.push((p>>8)&0xFF, p&0xFF);
-      i += run;
-    } else {
-      // literal run
-      const start = i;
-      let lit = 0;
-      while (i < widthPixels && lit < 128) {
-        // lookahead for next run >=3
-        let look = 1;
-        while (i+look < widthPixels && readPixel(i+look) === readPixel(i+look-1)) look++;
-        if (look >= 3) break;
-        i++; lit++;
-      }
-      out.push((lit-1) & 0xFF);
-      for (let k=0;k<lit;k++){
-        const p = readPixel(start + k);
-        out.push((p>>8)&0xFF, p&0xFF);
-      }
+function imaDecodeChunk(adpcmBytes) {
+  const predictor = adpcmBytes[0] | (adpcmBytes[1]<<8);
+  let index = adpcmBytes[2];
+  let out = new Int16Array((adpcmBytes.length-3)*2); // two samples per byte
+  let p = predictor;
+  let ptr = 0;
+  for(let i=3;i<adpcmBytes.length;i++){
+    let b = adpcmBytes[i];
+    for(let nib=0;nib<2;nib++){
+      let code = (nib===0)? (b&0xF) : (b>>4);
+      let step = IMA_STEP_TABLE[index];
+      let diffq = step>>3;
+      if(code & 1) diffq += step>>2;
+      if(code & 2) diffq += step>>1;
+      if(code & 4) diffq += step;
+      p += (code & 8)? -diffq : diffq;
+      if(p>32767) p=32767;
+      if(p<-32768) p=-32768;
+      index += IMA_INDEX_TABLE[code];
+      if(index<0) index=0;
+      if(index>88) index=88;
+      out[ptr++] = p;
     }
   }
-  return new Uint8Array(out);
+  return out.subarray(0, ptr); // trimmed
 }
 
-// --- audio decode + resample using OfflineAudioContext for better quality ---
-async function decodeAndResampleAudio(file, targetRate, channels) {
-  const arrayBuffer = await file.arrayBuffer();
-  const ac = new AudioContext();
-  const decoded = await ac.decodeAudioData(arrayBuffer.slice(0));
-  // create OfflineAudioContext to resample
-  const length = Math.ceil(decoded.duration * targetRate);
-  const offline = new OfflineAudioContext(channels, length, targetRate);
-  // create buffer source and route
-  const src = offline.createBufferSource();
-  // if decoded has multiple channels, copy them into a buffer for offline context with same channel count as decoded
-  const bufferForOffline = offline.createBuffer(decoded.numberOfChannels, decoded.length, decoded.sampleRate);
-  for (let ch=0; ch<decoded.numberOfChannels; ch++){
-    bufferForOffline.getChannelData(ch).set(decoded.getChannelData(ch));
-  }
-  src.buffer = bufferForOffline;
-  src.connect(offline.destination);
-  src.start(0);
-  const rendered = await offline.startRendering();
-  // convert rendered to interleaved Int16Array in requested channel layout
-  const outLen = rendered.length;
-  const interleaved = new Int16Array(outLen * channels);
-  for (let i=0;i<outLen;i++){
-    for (let ch=0; ch<channels; ch++){
-      let sample;
-      if (ch < rendered.numberOfChannels) {
-        sample = rendered.getChannelData(ch)[i];
-      } else {
-        // if requested more channels than source, duplicate last channel
-        sample = rendered.getChannelData(rendered.numberOfChannels-1)[i];
-      }
-      // clamp and convert
-      let val = Math.max(-1, Math.min(1, sample)) * 32767;
-      interleaved[i*channels + ch] = (val|0);
-    }
-  }
-  return {pcm: interleaved, sampleRate: targetRate, channels};
+// RGB565 -> RGBA8888
+function rgb565ToRgba565(hi, lo) {
+  const val = (hi<<8)|lo;
+  const r = ((val>>11)&0x1F)<<3;
+  const g = ((val>>5)&0x3F)<<2;
+  const b = (val&0x1F)<<3;
+  return [r,g,b,255];
 }
 
-// IMA encoder for Int16Array (interleaved)
-function imaEncodeSlice(pcmSlice) {
-  // pcmSlice: Int16Array
-  let predictor = 0|0;
-  let index = 0|0;
-  const nibbles = new Uint8Array(pcmSlice.length); // one nibble per sample
-  for (let i=0;i<pcmSlice.length;i++){
-    let sample = pcmSlice[i]|0;
-    let step = IMA_STEP_TABLE[index];
-    let diff = sample - predictor;
-    let sign = 0;
-    if (diff < 0) { sign = 8; diff = -diff; }
-    let delta = 0;
-    if (diff >= step) { delta |= 4; diff -= step; }
-    if (diff >= (step>>1)) { delta |= 2; diff -= (step>>1); }
-    if (diff >= (step>>2)) { delta |= 1; }
-    let nib = sign | delta;
-    // reconstruct
-    let diffq = 0;
-    if (delta & 4) diffq += step;
-    if (delta & 2) diffq += (step>>1);
-    if (delta & 1) diffq += (step>>2);
-    diffq += step >> 3;
-    if (sign) predictor -= diffq; else predictor += diffq;
-    if (predictor > 32767) predictor = 32767;
-    if (predictor < -32768) predictor = -32768;
-    index += IMA_INDEX_TABLE[nib & 15];
-    if (index < 0) index = 0;
-    if (index > 88) index = 88;
-    nibbles[i] = nib & 0xF;
-  }
-  const packed = packNibbles(nibbles);
-  // prepend predictor (16-bit LE) and index (1 byte)
-  const header = new Uint8Array(3);
-  header[0] = predictor & 0xFF;
-  header[1] = (predictor >> 8) & 0xFF;
-  header[2] = index & 0xFF;
-  // concat
-  const out = new Uint8Array(header.length + packed.length);
-  out.set(header, 0);
-  out.set(packed, header.length);
-  return out;
-}
+// --- Player ---
+document.getElementById('file').onchange = async (e)=>{
+  const f = e.target.files[0];
+  if(!f) return;
+  const data = new Uint8Array(await f.arrayBuffer());
+  if(String.fromCharCode(...data.slice(0,4))!=='VAM1') { alert('Not a VAM1 file'); return; }
 
-// --- UI helpers ---
-const fileInput = document.getElementById('file');
-const drop = document.getElementById('drop');
-const convertBtn = document.getElementById('convert');
-const prog = document.getElementById('prog');
-const status = document.getElementById('status');
-const info = document.getElementById('info');
-const dl = document.getElementById('dl');
-const log = document.getElementById('log');
+  const flags = data[4];
+  const width = readLE16(data,5);
+  const height = readLE16(data,7);
+  const fps = data[9];
+  const audioCodec = data[10];
+  const channels = data[11];
+  const sampleRate = readLE32(data,12);
+  const frameCount = readLE32(data,20);
 
-drop.addEventListener('dragover', e => { e.preventDefault(); drop.style.borderColor = '#888'; });
-drop.addEventListener('dragleave', e => { e.preventDefault(); drop.style.borderColor = '#ccc'; });
-drop.addEventListener('drop', e => {
-  e.preventDefault();
-  drop.style.borderColor = '#ccc';
-  if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-    fileInput.files = e.dataTransfer.files;
-    updateFileInfo(e.dataTransfer.files[0]);
-  }
-});
-
-fileInput.addEventListener('change', () => {
-  if (fileInput.files[0]) updateFileInfo(fileInput.files[0]);
-});
-
-function updateFileInfo(f) {
-  info.textContent = `${f.name} • ${Math.round(f.size/1024)} KB`;
-}
-
-// robust seek helper
-function seekVideo(video, t) {
-  return new Promise(resolve => {
-    const onseeked = () => { video.removeEventListener('seeked', onseeked); // small timeout ensures frame painted
-      setTimeout(resolve, 0);
-    };
-    video.addEventListener('seeked', onseeked);
-    video.currentTime = Math.min(t, Math.max(0, video.duration || t));
-  });
-}
-
-document.getElementById('convert').addEventListener('click', async () => {
-  const f = fileInput.files[0];
-  if (!f) { alert('Pick a file first'); return; }
-
-  // read params
-  const width = parseInt(document.getElementById('width').value,10) || 160;
-  const height = parseInt(document.getElementById('height').value,10) || 120;
-  const fps = Math.max(1, parseInt(document.getElementById('fps').value,10) || 20);
-  const asr = Math.max(4000, parseInt(document.getElementById('asr').value,10) || 22050);
-  const ach = parseInt(document.getElementById('ach').value,10) || 2;
-
-  // prepare video & canvas
-  const video = document.getElementById('v');
-  const canvas = document.getElementById('c');
+  const canvas = document.getElementById('canvas');
   canvas.width = width; canvas.height = height;
   const ctx = canvas.getContext('2d');
+  const imgData = ctx.createImageData(width,height);
 
-  video.src = URL.createObjectURL(f);
-  status.textContent = 'Loading video...';
-  await new Promise(r => video.onloadedmetadata = r);
+  let offset = 24;
+  let frames = [];
 
-  const duration = video.duration || 0;
-  const framesCount = Math.max(1, Math.floor(duration * fps));
-  prog.max = framesCount;
-  prog.value = 0;
-  status.textContent = `Decoding audio (${asr} Hz, ${ach} ch)...`;
-  info.textContent = `${f.name} • ${Math.round(f.size/1024)} KB • ${Math.round(duration*100)/100}s`;
-
-  // decode + resample
-  let audioObj;
-  try {
-    audioObj = await decodeAndResampleAudio(f, asr, ach);
-  } catch (e) {
-    console.error('Audio decode/resample failed', e);
-    // fallback: produce silent audio buffer if decode fails
-    audioObj = {pcm: new Int16Array(0), sampleRate: asr, channels: ach};
-  }
-  const audioPCM = audioObj.pcm; // interleaved Int16Array
-  let audioCursor = 0;
-  const samplesPerFrame = Math.floor(asr / fps);
-
-  // prepare output buffer builder (use array then convert)
-  const outArr = [];
-  // header
-  outArr.push('V'.charCodeAt(0),'A'.charCodeAt(0),'M'.charCodeAt(0),'1'.charCodeAt(0));
-  const flags = (1<<0) | (1<<1); // video + audio
-  outArr.push(flags & 0xFF);
-  writeLE16(outArr, width);
-  writeLE16(outArr, height);
-  outArr.push(fps & 0xFF);
-  outArr.push(1); // audio codec 1 = IMA ADPCM
-  outArr.push(ach & 0xFF);
-  writeLE32(outArr, asr);
-  writeLE32(outArr, framesCount);
-
-  status.textContent = 'Converting frames...';
-  // iterate frames
-  for (let frame=0; frame<framesCount; frame++){
-    const t = Math.min(duration, (frame + 0.0001) / fps);
-    await seekVideo(video, t);
-    ctx.drawImage(video, 0, 0, width, height);
-    const img = ctx.getImageData(0,0,width,height);
-
-    // frame compression: iterate scanlines and append compressed bytes into a contiguous array
-    const frameChunksParts = []; // collect Uint8Array parts
-    let totalFrameBytes = 0;
-    for (let y=0;y<height;y++){
-      const scan = rgbaToRgb565Bytes(img.data, y, width);
-      const compressed = compressScanline565(scan, width);
-      frameChunksParts.push(compressed);
-      totalFrameBytes += compressed.length;
-    }
-
-    // write frame chunk size and content
-    writeLE32(outArr, totalFrameBytes);
-    for (let p=0;p<frameChunksParts.length;p++){
-      const chunk = frameChunksParts[p];
-      for (let b=0;b<chunk.length;b++) outArr.push(chunk[b]);
-    }
-
-    // audio slice for this frame (interleaved)
-    const samplesWanted = samplesPerFrame * ach;
-    const available = Math.max(0, Math.min(audioPCM.length - audioCursor, samplesWanted));
-    const slice = new Int16Array(available);
-    for (let i=0;i<available;i++) slice[i] = audioPCM[audioCursor + i];
-    audioCursor += available;
-
-    // ADPCM encode slice
-    const adpcm = imaEncodeSlice(slice);
-    writeLE32(outArr, adpcm.length);
-    for (let i=0;i<adpcm.length;i++) outArr.push(adpcm[i]);
-
-    prog.value = frame+1;
-    status.textContent = `Converting frames... (${frame+1}/${framesCount})`;
-    // small yield so UI updates for large files
-    await new Promise(r => setTimeout(r, 0));
+  // parse frames
+  for(let fidx=0;fidx<frameCount;fidx++){
+    const frameSize = readLE32(data, offset); offset+=4;
+    const frameBytes = data.slice(offset, offset+frameSize); offset+=frameSize;
+    const audioSize = readLE32(data, offset); offset+=4;
+    const audioBytes = data.slice(offset, offset+audioSize); offset+=audioSize;
+    frames.push({frameBytes,audioBytes});
   }
 
-  // finalize blob
-  const outBytes = new Uint8Array(outArr);
-  const blob = new Blob([outBytes], {type:'application/octet-stream'});
-  dl.style.display = 'inline';
-  dl.href = URL.createObjectURL(blob);
-  dl.download = `${f.name.replace(/\.[^/.]+$/,"")}.vam`;
-  dl.textContent = `Download .vam (${outArr.length} bytes)`;
-  status.textContent = `Done — ${outArr.length} bytes`;
-  alert(`Converted ${framesCount} frames. File size: ${outArr.length} bytes`);
-});
+  // decode all audio to Float32 for WebAudio
+  const audioCtx = new AudioContext();
+  const totalSamples = frames.reduce((a,f)=>a+imaDecodeChunk(f.audioBytes).length,0);
+  const audioBuffer = audioCtx.createBuffer(channels, totalSamples/channels, sampleRate);
+  let samplePos = 0;
+  for(let f of frames){
+    const pcm = imaDecodeChunk(f.audioBytes);
+    for(let i=0;i<pcm.length;i++){
+      const ch = i%channels;
+      audioBuffer.getChannelData(ch)[samplePos/channels|0] = pcm[i]/32768;
+    }
+    samplePos += pcm.length;
+  }
 
+  const source = audioCtx.createBufferSource();
+  source.buffer = audioBuffer;
+  source.connect(audioCtx.destination);
+  source.start();
+
+  // render frames at fps
+  let currentFrame = 0;
+  function render(){
+    if(currentFrame>=frames.length) return;
+    const fBytes = frames[currentFrame].frameBytes;
+    let ptr = 0;
+    for(let y=0;y<height;y++){
+      let x=0;
+      while(x<width){
+        let header = fBytes[ptr++];
+        if(header & 0x80) { // repeat run
+          const count = 256-header+1; // -(run-1)
+          const hi = fBytes[ptr++];
+          const lo = fBytes[ptr++];
+          for(let k=0;k<count;k++){
+            const rgba = rgb565ToRgba565(hi,lo);
+            const idx = (y*width + x)*4;
+            imgData.data.set(rgba, idx);
+            x++;
+          }
+        } else { // literal
+          const count = header+1;
+          for(let k=0;k<count;k++){
+            const hi = fBytes[ptr++];
+            const lo = fBytes[ptr++];
+            const rgba = rgb565ToRgba565(hi,lo);
+            const idx = (y*width + x)*4;
+            imgData.data.set(rgba, idx);
+            x++;
+          }
+        }
+      }
+    }
+    ctx.putImageData(imgData,0,0);
+    currentFrame++;
+    setTimeout(render, 1000/fps);
+  }
+  render();
+};
 </script>
 </body>
 </html>
