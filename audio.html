@@ -1,193 +1,161 @@
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Convert → ESP32 WAV (22k/10k • 8/4-bit)</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-      :root { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans"; }
-      body { margin: 0; display: grid; place-items: center; min-height: 100vh; background: #0b1020; color: #e7ecf7; }
-      .card { width: min(720px,92vw); background:#12192e; border-radius:18px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.35); }
-      h1 { margin:0 0 12px; font-size:1.2rem; font-weight:600; letter-spacing:0.2px; }
-      p { margin:0 0 14px; color:#b9c3d6; }
-      label { display:inline-block; margin:14px 0 8px; color:#cdd7ea; }
-      input[type="file"], select { width:100%; padding:12px; border-radius:12px; border:1px dashed #3a4360; background:#0e1528; color:#cdd7ea; }
-      .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:8px; }
-      button { margin-top:14px; padding:12px 16px; border:0; border-radius:12px; background:#3b82f6; color:white; font-weight:600; cursor:pointer; }
-      button:disabled { opacity:0.5; cursor:not-allowed; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:0.95rem; color:#9fb2d9; }
-      progress { width:220px; height:10px; accent-color:#3b82f6; }
-      .hint { font-size:0.9rem; color:#93a3c6; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>Convert to ESP32-friendly WAV</h1>
-      <p>Output file will be <span class="mono">test.wav</span>. Choose target sample rate and bit-mode (4-bit is stored in 8-bit bytes with 16 levels for compatibility).</p>
+<head>
+<meta charset="utf-8" />
+<title>Convert → ESP32 WAV (always 8-bit; 22k / 11k / 5.5k)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+:root { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans"; }
+body { margin: 0; display: grid; place-items: center; min-height: 100vh; background: #0b1020; color: #e7ecf7; }
+.card { width: min(720px,92vw); background:#12192e; border-radius:18px; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,0.35); }
+h1 { margin:0 0 12px; font-size:1.2rem; font-weight:600; letter-spacing:0.2px; }
+p { margin:0 0 14px; color:#b9c3d6; }
+label { display:inline-block; margin:14px 0 8px; color:#cdd7ea; }
+input[type="file"], select { width:100%; padding:12px; border-radius:12px; border:1px dashed #3a4360; background:#0e1528; color:#cdd7ea; }
+.row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+button { margin-top:14px; padding:12px 16px; border:0; border-radius:12px; background:#3b82f6; color:white; font-weight:600; cursor:pointer; }
+button:disabled { opacity:0.5; cursor:not-allowed; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:0.95rem; color:#9fb2d9; }
+progress { width:220px; height:10px; accent-color:#3b82f6; }
+.hint { font-size:0.9rem; color:#93a3c6; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Convert to ESP32-friendly WAV (8-bit unsigned)</h1>
+  <p>Output file will be <span class="mono">test.wav</span>. Choose target sample rate. Output is always 8-bit PCM unsigned (0..255).</p>
 
-      <label for="file">Choose an audio file (MP3, WAV, AAC, FLAC, etc.)</label>
-      <input id="file" type="file" accept="audio/*" />
+  <label for="file">Choose an audio file (MP3, WAV, AAC, FLAC, etc.)</label>
+  <input id="file" type="file" accept="audio/*" />
 
-      <label for="quality">Select target format</label>
-      <select id="quality">
-        <option value="22k-8">22.05 kHz — 8-bit PCM (unsigned)</option>
-        <option value="22k-4" selected>22.05 kHz — 4-bit (simulated in 8-bit)</option>
-        <option value="10k-4">10.00 kHz — 4-bit (simulated in 8-bit)</option>
-      </select>
+  <label for="samplerate">Select output sample rate</label>
+  <select id="samplerate">
+    <option value="22050" selected>22.050 kHz</option>
+    <option value="11025">11.025 kHz</option>
+    <option value="5512">5.512 kHz</option>
+  </select>
 
-      <div class="row">
-        <button id="convert" disabled>Convert & Download</button>
-        <progress id="prog" max="100" value="0" hidden></progress>
-        <span id="status" class="hint"></span>
-      </div>
-    </div>
+  <label for="bandpass">Apply 200–2000 Hz bandpass filter</label>
+  <select id="bandpass">
+    <option value="off" selected>Off</option>
+    <option value="on">On</option>
+  </select>
 
-    <script>
-      const $file = document.getElementById('file');
-      const $quality = document.getElementById('quality');
-      const $btn = document.getElementById('convert');
-      const $prog = document.getElementById('prog');
-      const $status = document.getElementById('status');
+  <div class="row">
+    <button id="convert" disabled>Convert & Download</button>
+    <progress id="prog" max="100" value="0" hidden></progress>
+    <span id="status" class="hint"></span>
+  </div>
+</div>
 
-      let selectedFile = null;
+<script>
+const $file = document.getElementById('file');
+const $samplerate = document.getElementById('samplerate');
+const $bandpass = document.getElementById('bandpass');
+const $btn = document.getElementById('convert');
+const $prog = document.getElementById('prog');
+const $status = document.getElementById('status');
 
-      $file.addEventListener('change', () => {
-        selectedFile = $file.files && $file.files[0] ? $file.files[0] : null;
-        $btn.disabled = !selectedFile;
-        $status.textContent = selectedFile ? `Selected: ${selectedFile.name}` : '';
-      });
+let selectedFile = null;
 
-      $btn.addEventListener('click', async () => {
-        if (!selectedFile) return;
-        const q = $quality.value;
-        const OUT_SAMPLE_RATE = q === '22k-8' || q === '22k-4' ? 22050 : 10000;
-        const OUT_BITS = q === '22k-8' ? 8 : 4; // 4-bit simulated
-        const OUT_CHANNELS = 1;
+$file.addEventListener('change', () => {
+  selectedFile = $file.files && $file.files[0] ? $file.files[0] : null;
+  $btn.disabled = !selectedFile;
+  $status.textContent = selectedFile ? `Selected: ${selectedFile.name}` : '';
+});
 
-        try {
-          $btn.disabled = true;
-          $prog.hidden = false;
-          $prog.value = 0;
-          $status.textContent = 'Decoding…';
+$btn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  const OUT_SAMPLE_RATE = parseInt($samplerate.value, 10);
+  const OUT_BITS = 8; // always 8-bit unsigned
+  const OUT_CHANNELS = 1;
 
-          const arrayBuf = await selectedFile.arrayBuffer();
+  try {
+    $btn.disabled = true;
+    $prog.hidden = false;
+    $prog.value = 0;
+    $status.textContent = 'Decoding…';
 
-          // Decode audio
-          const decodeCtx = new (window.AudioContext || window.webkitAudioContext)();
-          const decoded = await decodeCtx.decodeAudioData(arrayBuf);
-          await decodeCtx.close();
+    const arrayBuf = await selectedFile.arrayBuffer();
+    const decodeCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const decoded = await decodeCtx.decodeAudioData(arrayBuf);
+    await decodeCtx.close();
 
-          // Resample + downmix to mono
-          const lengthInFrames = Math.ceil(decoded.duration * OUT_SAMPLE_RATE);
-          const offline = new OfflineAudioContext(OUT_CHANNELS, lengthInFrames, OUT_SAMPLE_RATE);
-          const src = offline.createBufferSource();
-          src.buffer = decoded;
+    const lengthInFrames = Math.ceil(decoded.duration * OUT_SAMPLE_RATE);
+    const offline = new OfflineAudioContext(OUT_CHANNELS, lengthInFrames, OUT_SAMPLE_RATE);
+    const src = offline.createBufferSource();
+    src.buffer = decoded;
 
-          const gain = offline.createGain();
-          gain.gain.value = 0.95; // slight headroom
-          src.connect(gain).connect(offline.destination);
-          src.start(0);
+    const gain = offline.createGain();
+    gain.gain.value = 0.95;
 
-          $status.textContent = `Resampling to ${OUT_SAMPLE_RATE} Hz & mixing to mono…`;
-          const rendered = await offline.startRendering();
+    // Bandpass filter
+    if ($bandpass.value === 'on') {
+      const filter = offline.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 1100; // approx center of 200–2000 Hz
+      filter.Q.value = 1; // moderate bandwidth
+      src.connect(filter).connect(gain).connect(offline.destination);
+    } else {
+      src.connect(gain).connect(offline.destination);
+    }
+    src.start(0);
 
-          const chData = rendered.getChannelData(0); // Float32 [-1,1]
-          let pcmBuffer;
-          if (OUT_BITS === 16) {
-            pcmBuffer = new ArrayBuffer(chData.length * 2);
-            const view = new DataView(pcmBuffer);
-            for (let i = 0; i < chData.length; i++) {
-              let s = Math.max(-1, Math.min(1, chData[i]));
-              view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-              if ((i & 0xffff) === 0) $prog.value = Math.min(100, Math.round((i / chData.length) * 100));
-            }
-          } else if (OUT_BITS === 8) {
-            pcmBuffer = new ArrayBuffer(chData.length);
-            const view = new DataView(pcmBuffer);
-            for (let i = 0; i < chData.length; i++) {
-              let s = Math.max(-1, Math.min(1, chData[i]));
-              // unsigned 8-bit PCM: 0..255
-              const u8 = Math.round((s + 1) * 127.5);
-              view.setUint8(i, u8);
-              if ((i & 0xffff) === 0) $prog.value = Math.min(100, Math.round((i / chData.length) * 100));
-            }
-          } else {
-            // 4-bit simulated: store one byte per sample but only 16 levels (0..15 scaled to 0..255)
-            pcmBuffer = new ArrayBuffer(chData.length);
-            const view = new DataView(pcmBuffer);
-            for (let i = 0; i < chData.length; i++) {
-              let s = Math.max(-1, Math.min(1, chData[i]));
-              // Map to 16 levels 0..15
-              let level = Math.floor((s + 1) * 7.5 + 0.00001);
-              if (level < 0) level = 0;
-              if (level > 15) level = 15;
-              let byteVal = level * 17; // 0..255
-              view.setUint8(i, byteVal);
-              if ((i & 0xffff) === 0) $prog.value = Math.min(100, Math.round((i / chData.length) * 100));
-            }
-          }
+    $status.textContent = `Resampling to ${OUT_SAMPLE_RATE} Hz & mixing to mono…`;
+    const rendered = await offline.startRendering();
+    const chData = rendered.getChannelData(0);
 
-          // Build WAV container
-          const bitsForHeader = OUT_BITS === 4 ? 8 : (OUT_BITS === 8 ? 8 : 16);
-          const wavBytes = buildWavFile(pcmBuffer, {
-            sampleRate: OUT_SAMPLE_RATE,
-            numChannels: OUT_CHANNELS,
-            bitsPerSample: bitsForHeader
-          });
+    // always produce unsigned 8-bit PCM
+    const pcmBuffer = new ArrayBuffer(chData.length);
+    const view = new DataView(pcmBuffer);
+    for (let i = 0; i < chData.length; i++) {
+      let s = Math.max(-1, Math.min(1, chData[i]));
+      const u8 = Math.round((s + 1) * 127.5); // map -1..1 -> 0..255
+      view.setUint8(i, u8);
+      if ((i & 0xffff) === 0) $prog.value = Math.min(100, Math.round((i / chData.length) * 100));
+    }
 
-          const blob = new Blob([wavBytes], { type: 'audio/wav' });
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = 'test.wav';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
+    const bitsForHeader = 8;
+    const wavBytes = buildWavFile(pcmBuffer, { sampleRate: OUT_SAMPLE_RATE, numChannels: OUT_CHANNELS, bitsPerSample: bitsForHeader });
+    const blob = new Blob([wavBytes], { type: 'audio/wav' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'test.wav';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 
-          $prog.value = 100;
-          $status.textContent = `Done. Downloaded test.wav — ${OUT_SAMPLE_RATE} Hz, ${OUT_BITS}-bit(sim)`;
-        } catch (err) {
-          console.error(err);
-          alert('Conversion failed: ' + (err && err.message ? err.message : err));
-          $status.textContent = 'Error.';
-        } finally {
-          $btn.disabled = false;
-          setTimeout(() => { $prog.hidden = true; $prog.value = 0; }, 1000);
-        }
-      });
+    $prog.value = 100;
+    $status.textContent = `Done. Downloaded test.wav — ${OUT_SAMPLE_RATE} Hz, ${OUT_BITS}-bit (unsigned)`;
+  } catch (err) {
+    console.error(err);
+    alert('Conversion failed: ' + (err && err.message ? err.message : err));
+    $status.textContent = 'Error.';
+  } finally {
+    $btn.disabled = false;
+    setTimeout(() => { $prog.hidden = true; $prog.value = 0; }, 1000);
+  }
+});
 
-      function buildWavFile(pcmBuffer, { sampleRate, numChannels, bitsPerSample }) {
-        const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
-        const blockAlign = numChannels * (bitsPerSample / 8);
-        const dataSize = pcmBuffer.byteLength;
-        const headerSize = 44;
-        const totalSize = headerSize + dataSize;
+function buildWavFile(pcmBuffer, { sampleRate, numChannels, bitsPerSample }) {
+  const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const dataSize = pcmBuffer.byteLength;
+  const headerSize = 44;
+  const totalSize = headerSize + dataSize;
+  const buf = new ArrayBuffer(totalSize);
+  const dv = new DataView(buf);
 
-        const buf = new ArrayBuffer(totalSize);
-        const dv = new DataView(buf);
+  writeString(dv, 0, 'RIFF'); dv.setUint32(4, totalSize-8,true); writeString(dv,8,'WAVE');
+  writeString(dv,12,'fmt '); dv.setUint32(16,16,true); dv.setUint16(20,1,true);
+  dv.setUint16(22,numChannels,true); dv.setUint32(24,sampleRate,true); dv.setUint32(28,byteRate,true);
+  dv.setUint16(32,blockAlign,true); dv.setUint16(34,bitsPerSample,true);
+  writeString(dv,36,'data'); dv.setUint32(40,dataSize,true);
+  new Uint8Array(buf,44).set(new Uint8Array(pcmBuffer));
+  return buf;
+}
 
-        writeString(dv, 0, 'RIFF');
-        dv.setUint32(4, totalSize - 8, true);
-        writeString(dv, 8, 'WAVE');
-
-        writeString(dv, 12, 'fmt ');
-        dv.setUint32(16, 16, true); // PCM
-        dv.setUint16(20, 1, true);
-        dv.setUint16(22, numChannels, true);
-        dv.setUint32(24, sampleRate, true);
-        dv.setUint32(28, byteRate, true);
-        dv.setUint16(32, blockAlign, true);
-        dv.setUint16(34, bitsPerSample, true);
-
-        writeString(dv, 36, 'data');
-        dv.setUint32(40, dataSize, true);
-
-        new Uint8Array(buf, 44).set(new Uint8Array(pcmBuffer));
-        return buf;
-      }
-
-      function writeString(dv, offset, str) {
-        for (let i = 0; i < str.length; i++) dv.setUint8(offset + i, str.charCodeAt(i));
-      }
-    </script>
-  </body>
+function writeString(dv, offset, str) { for(let i=0;i<str.length;i++) dv.setUint8(offset+i,str.charCodeAt(i)); }
+</script>
+</body>
 </html>
